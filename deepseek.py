@@ -1,12 +1,18 @@
 import asyncio
+import logging
 from typing import Any, Optional, Iterator
 from typing import AsyncIterator
+from typing import Any, Dict, Iterator, List, Optional
+from typing_extensions import List, TypedDict
 
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, LLMResult
+from langchain_core.callbacks import CallbackManagerForLLMRun
+
 from langchain_openai import ChatOpenAI
 
+logger = logging.getLogger(__name__)
 
 class DeepseekChatOpenAI(ChatOpenAI):
     async def _astream(
@@ -62,6 +68,59 @@ class DeepseekChatOpenAI(ChatOpenAI):
                     generation_info={"reasoning": reasoning}
                 )
 
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        openai_messages = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                openai_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                openai_messages.append({"role": "assistant", "content": msg.content})
+            elif isinstance(msg, SystemMessage):
+                openai_messages.append({"role": "system", "content": msg.content})
+            else:
+                raise ValueError(f"Unsupported message type: {type(msg)}")
+
+        params = {
+            "model": self.model_name,
+            "messages": openai_messages,
+            **self.model_kwargs,
+            **kwargs,
+            "extra_body": {
+                "enable_enhanced_generation": True,
+                **(kwargs.get("extra_body", {})),
+                **(self.model_kwargs.get("extra_body", {}))
+            }
+        }
+        params = {k: v for k, v in params.items() if v not in (None, {}, [])}
+
+        # Create and process the stream
+        for chunk in self.client.create(
+                stream=True,
+                **params
+        ):
+            content = chunk.choices[0].delta.content or ""
+            reasoning = chunk.choices[0].delta.model_extra.get("reasoning_content", "") if chunk.choices[
+                0].delta.model_extra else ""
+            if content:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(content=content),
+                    generation_info={"reasoning": reasoning}
+                )
+            if reasoning:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content="",
+                        additional_kwargs={"reasoning": reasoning}
+                    ),
+                    generation_info={"reasoning": reasoning}
+                )
+
     def invoke(
             self,
             messages: Any,
@@ -69,8 +128,6 @@ class DeepseekChatOpenAI(ChatOpenAI):
             run_manager: Optional[Any] = None,
             **kwargs: Any,
     ) -> AIMessage:
-        print("Invoke")
-        print(messages)
 
         async def _ainvoke():
             combined_content = []
